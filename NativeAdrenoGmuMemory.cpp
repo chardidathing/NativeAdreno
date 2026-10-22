@@ -6,14 +6,25 @@ NativeAdrenoGmuSizes NativeAdrenoGmuDefaultSizes(size_t table_bytes)
 {
     return {0xffc000,0x4000,0x7000,0x4000,0x4000,table_bytes};
 }
+NativeAdrenoGmuSizes NativeAdrenoGmuFamilySizes(NativeAdrenoFamily family,size_t table_bytes)
+{
+    const NativeAdrenoFamilyInfo *info=NativeAdrenoFamilyGet(family);
+    NativeAdrenoGmuSizes sizes=NativeAdrenoGmuDefaultSizes(table_bytes);
+    if(!info)return {0,0,0,0,0,0};
+    /* a6xx_gmu_init: the icache (SZ_16M - SZ_16K at 0x4000), log and hfi (SZ_16K) are the same for both families, the
+     * dummy and debug objects are the family's */
+    sizes.dummy=info->gmu_dummy_bytes;sizes.debug=info->gmu_debug_bytes;
+    return sizes;
+}
 IOReturn NativeAdrenoGmuAllocator::allocate(const NativeAdrenoGmuSizes &sizes,unsigned address_bits)
 {
     if(ready_ || icache_.bytes())return kIOReturnBusy;
-    const uint64_t requested[]={sizes.icache,sizes.dummy,sizes.debug,sizes.log,
-        sizes.hfi,sizes.tables};
+    const uint64_t requested[]={sizes.icache,sizes.dummy,sizes.log,sizes.hfi,sizes.tables};
     for(uint64_t value:requested)
         if(!value || (value&(PageBytes-1)) || value>uint64_t(SIZE_MAX))
             return kIOReturnBadArgument;
+    /* the debug object is optional (none on the a650 family), the rest is not */
+    if((sizes.debug&(PageBytes-1)) || sizes.debug>uint64_t(SIZE_MAX))return kIOReturnBadArgument;
     /* The fixed addresses of a6xx_gmu.c at the pinned tree: icache at 0x4000 below the uncached range, dummy and
      * debug at 0x60000000/0x60400000. Log and HFI have no fixed address there; drm_mm gives them the lowest free
      * pages after the dummy, which is where they are put here. */
@@ -29,6 +40,7 @@ IOReturn NativeAdrenoGmuAllocator::allocate(const NativeAdrenoGmuSizes &sizes,un
         {&hfi_,sizes.hfi,&layout_.hfi_iova,GmuUncachedBase+sizes.dummy+sizes.log},
         {&tables_,sizes.tables,&layout_.tables_iova,0}};
     for(const Selection &selection:selections) {
+        if(!selection.bytes) {*selection.iova=0;continue;}
         const IOReturn status=selection.memory->allocate(static_cast<size_t>(selection.bytes),
             address_bits,true,static_cast<size_t>(selection.bytes));
         if(status) {
@@ -38,7 +50,7 @@ IOReturn NativeAdrenoGmuAllocator::allocate(const NativeAdrenoGmuSizes &sizes,un
         *selection.iova=selection.at;
     }
     layout_.tables_bytes=static_cast<size_t>(sizes.tables);
-    layout_.end_iova=GmuDebugIova+sizes.debug;
+    layout_.end_iova=sizes.debug?GmuDebugIova+sizes.debug:GmuUncachedBase+sizes.dummy+sizes.log+sizes.hfi;
     ready_=true;
     return kIOReturnSuccess;
 }
@@ -52,6 +64,7 @@ IOReturn NativeAdrenoGmuAllocator::mapInto(NativeAdrenoVm *vm)
     const uint64_t iovas[]={layout_.icache_iova,layout_.dummy_iova,layout_.debug_iova,
         layout_.log_iova,layout_.hfi_iova};
     for(size_t index=0;index<5;++index) {
+        if(!objects[index]->bytes())continue;   /* no debug object on the a650 */
         /* a6xx_gmu.c maps the icache MAP_PRIV and every buffer without NOEXEC; here only the icache, which
          * the GMU executes from, is executable, and the data buffers stay execute-never. */
         const unsigned permissions=index?3u:15u;

@@ -6,17 +6,25 @@
 extern "C" volatile uint32_t native_adreno_pool_mib;
 extern "C" volatile uint32_t native_adreno_pool_stats[8],native_adreno_pool_status;
 extern "C" volatile uint32_t native_adreno_wc_enabled,native_adreno_pool_wc;
-static const uint64_t kIovas[GpuBufferCount]={GpuSqeIova,GpuRingIova,GpuMemptrsIova,GpuPwrupIova,GpuScratchIova};
+/* the a740 layout, relative to the family's kernel_iova_base (1 MiB on the a740, so these are GpuSqeIova and friends) */
+static const uint64_t kOffsets[GpuBufferCount]={GpuSqeIova-GpuSqeIova,GpuRingIova-GpuSqeIova,GpuMemptrsIova-GpuSqeIova,
+    GpuPwrupIova-GpuSqeIova,GpuScratchIova-GpuSqeIova};
 static const size_t kBytes[GpuBufferCount]={GpuSqeBytes,GpuRingBytes,GpuPageBytes,GpuPageBytes,GpuPageBytes};
+void NativeAdrenoGpuContextIovas(NativeAdrenoFamily family,uint64_t out[GpuBufferCount])
+{
+    const NativeAdrenoFamilyInfo *info=NativeAdrenoFamilyGet(family);
+    for(unsigned i=0;i<GpuBufferCount;++i)out[i]=info?info->kernel_iova_base+kOffsets[i]:0;
+}
 IOReturn NativeAdrenoGpuContext::bringUp(const ArmSmmu4KIo *io,unsigned bank,unsigned asid,const unsigned slots[2],
-    const uint16_t sids[2],void (*progress)(uint32_t),NativeAdrenoGmuContextReport *report)
+    const uint16_t sids[2],void (*progress)(uint32_t),NativeAdrenoGmuContextReport *report,NativeAdrenoFamily family)
 {
     if(!report)return kIOReturnBadArgument;
     *report={};
     if(used_)return kIOReturnBusy;
     if(!io || !slots || !sids || bank>63 || !asid || asid>0xffff || slots[0]>127 || slots[1]>127 ||
-        slots[0]==slots[1])return kIOReturnBadArgument;
+        slots[0]==slots[1] || !NativeAdrenoFamilyGet(family))return kIOReturnBadArgument;
     used_=true;
+    NativeAdrenoGpuContextIovas(family,iovas_);
     IOReturn status=kIOReturnSuccess;
     auto step=[&](Step s) {report->step=s;if(progress)progress(s);};
     step(Allocate);
@@ -76,7 +84,7 @@ IOReturn NativeAdrenoGpuContext::bringUp(const ArmSmmu4KIo *io,unsigned bank,uns
         step(Map);
         /* adreno_fw_create_bo maps the SQE MSM_BO_GPU_READONLY without NOEXEC; every other kernel BO read/write. */
         for(unsigned i=0;!status && i<GpuBufferCount;++i)
-            status=vm_.map(&buffers_[i],0,kIovas[i],i?3u:5u,0,2,&handles_[i]);
+            status=vm_.map(&buffers_[i],0,iovas_[i],i?3u:5u,0,2,&handles_[i]);
         report->spans=uint32_t(vm_.spanCount());
     }
     if(!status) {
@@ -87,20 +95,27 @@ IOReturn NativeAdrenoGpuContext::bringUp(const ArmSmmu4KIo *io,unsigned bank,uns
     return status;
 }
 static NativeAdrenoGpuContext *board_gpu_context;
-extern "C" IOReturn NativeAdrenoGpuContextBringup(volatile uint8_t *smmu,size_t bytes,unsigned bank,unsigned asid,
-    unsigned slot0,unsigned sid0,unsigned slot1,unsigned sid1,void (*progress)(uint32_t),
+extern "C" IOReturn NativeAdrenoGpuContextBringupFamily(uint32_t family,volatile uint8_t *smmu,size_t bytes,unsigned bank,
+    unsigned asid,unsigned slot0,unsigned sid0,unsigned slot1,unsigned sid1,void (*progress)(uint32_t),
     NativeAdrenoGmuContextReport *report)
 {
     static ArmSmmu4KMmio mmio;
     static ArmSmmu4KIo io;
-    if(!report || board_gpu_context || !smmu || !bytes || sid0>0xffff || sid1>0xffff)return kIOReturnBadArgument;
+    if(!report || board_gpu_context || !smmu || !bytes || sid0>0xffff || sid1>0xffff ||
+        !NativeAdrenoFamilyGet(NativeAdrenoFamily(family)))return kIOReturnBadArgument;
     mmio={reinterpret_cast<volatile unsigned char *>(smmu),bytes};
     if(ArmSmmu4KBindMmio(&mmio,&io)!=ArmSmmu4KSuccess)return kIOReturnBadArgument;
     board_gpu_context=new NativeAdrenoGpuContext;
     if(!board_gpu_context)return kIOReturnNoMemory;
     const unsigned slots[2]={slot0,slot1};
     const uint16_t sids[2]={uint16_t(sid0),uint16_t(sid1)};
-    return board_gpu_context->bringUp(&io,bank,asid,slots,sids,progress,report);
+    return board_gpu_context->bringUp(&io,bank,asid,slots,sids,progress,report,NativeAdrenoFamily(family));
+}
+extern "C" IOReturn NativeAdrenoGpuContextBringup(volatile uint8_t *smmu,size_t bytes,unsigned bank,unsigned asid,
+    unsigned slot0,unsigned sid0,unsigned slot1,unsigned sid1,void (*progress)(uint32_t),
+    NativeAdrenoGmuContextReport *report)
+{
+    return NativeAdrenoGpuContextBringupFamily(NativeAdrenoFamilyA740,smmu,bytes,bank,asid,slot0,sid0,slot1,sid1,progress,report);
 }
 extern "C" IOReturn NativeAdrenoGpuContextBuffers(NativeAdrenoGpuBuffer out[5])
 {
@@ -110,7 +125,7 @@ extern "C" IOReturn NativeAdrenoGpuContextBuffers(NativeAdrenoGpuBuffer out[5])
     for(unsigned i=0;i<GpuBufferCount;++i) {
         const NativeAdrenoMemory &m=board_gpu_context->buffer(i);
         if(m.spanCount()!=1 || m.spans()[0].bytes!=m.bytes())return kIOReturnUnsupported;
-        out[i]={m.spans()[0].physical,m.bytes(),kIovas[i]};
+        out[i]={m.spans()[0].physical,m.bytes(),board_gpu_context->iova(i)};
     }
     return kIOReturnSuccess;
 }

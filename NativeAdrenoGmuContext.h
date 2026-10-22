@@ -40,22 +40,29 @@ public:
     NativeAdrenoGmuContext()=default;
     NativeAdrenoGmuContext(const NativeAdrenoGmuContext &)=delete;
     NativeAdrenoGmuContext &operator=(const NativeAdrenoGmuContext &)=delete;
-    /* One attempt per object. progress (may be null) is called before each step. */
+    /* One attempt per object. progress (may be null) is called before each step. The family picks the payload
+     * sizes (NativeAdrenoGmuFamilySizes); the default keeps the a740 layout. */
     IOReturn bringUp(const ArmSmmu4KIo *io,unsigned bank,unsigned asid,unsigned slot,
-        uint16_t sid,void (*progress)(uint32_t step),NativeAdrenoGmuContextReport *report);
+        uint16_t sid,void (*progress)(uint32_t step),NativeAdrenoGmuContextReport *report,
+        NativeAdrenoFamily family=NativeAdrenoFamilyA740);
     bool ready() const {return ready_;}
     NativeAdrenoGmuAllocator &allocator() {return gmu_;}
     NativeAdrenoVm &vm() {return vm_;}
 };
 /* Board entry: binds the kit's direct MMIO adapter to an owned live mapping of the
- * whole SMMU window and runs bringUp on a context that lives forever. */
+ * whole SMMU window and runs bringUp on a context that lives forever. The first form keeps the a740 layout, the
+ * second takes the family (NativeAdrenoFamily). */
 extern "C" IOReturn NativeAdrenoGmuContextBringup(volatile uint8_t *smmu,size_t bytes,
+    unsigned bank,unsigned asid,unsigned slot,unsigned sid,void (*progress)(uint32_t),
+    NativeAdrenoGmuContextReport *report);
+extern "C" IOReturn NativeAdrenoGmuContextBringupFamily(uint32_t family,volatile uint8_t *smmu,size_t bytes,
     unsigned bank,unsigned asid,unsigned slot,unsigned sid,void (*progress)(uint32_t),
     NativeAdrenoGmuContextReport *report);
 /* The payloads of the context the board entry built, in ShengGmuConfig order (icache, dummy, debug,
  * log, hfi): physical base, size and GMU address of each physically contiguous object. Only after
  * that context reached Ready. The GMU maps them Normal non-cacheable (MAIR index 0), as Linux maps
- * the GMU buffers without IOMMU_CACHE; the caller gives the CPU a matching non-cacheable view. */
+ * the GMU buffers without IOMMU_CACHE; the caller gives the CPU a matching non-cacheable view. A family without a
+ * debug object (a650) reports an all-zero debug entry. */
 struct NativeAdrenoGmuPayload {uint64_t physical,bytes,iova;};
 extern "C" IOReturn NativeAdrenoGmuContextPayloads(NativeAdrenoGmuPayload out[5]);
 #endif

@@ -105,5 +105,30 @@ int main()
         CHECK(fifth.detach()==kIOReturnNotReady);
         CHECK(irq.detach()==kIOReturnNotReady && second.detach()==kIOReturnNotReady);
     }
-    std::printf("PASS: 1 exact A7XX mask programming, 10 decoded interrupt/status cases, 5 poison-on-unacknowledged cases over a software register peer\n");
+    /* a650: the A6XX_INT_MASK enable set, no fuse or TSB sources, the a6xx CP error bits only. */
+    {
+        reset();NativeAdrenoIrq irq;CHECK(irq.attach(&io,NativeAdrenoFamilyA650)==kIOReturnSuccess);
+        uint32_t programmed=0;
+        CHECK(irq.programMask(&programmed)==kIOReturnSuccess && programmed==NativeAdrenoIrq::maskFor(NativeAdrenoFamilyA650));
+        CHECK(programmed==((1u<<1)|(1u<<6)|(1u<<9)|(1u<<13)|(1u<<14)|(1u<<15)|(1u<<20)|(1u<<22)|(1u<<23)|(1u<<24)|(1u<<25)));
+        CHECK(NativeAdrenoIrq::maskFor(NativeAdrenoFamilyA740)==NativeAdrenoIrq::mask() && NativeAdrenoIrq::cpErrorMaskFor(NativeAdrenoFamilyA740)==NativeAdrenoIrq::cpErrorMask());
+        CHECK(NativeAdrenoIrq::cpErrorMaskFor(NativeAdrenoFamilyA650)==0xf7u && !NativeAdrenoIrq::maskFor(NativeAdrenoFamily(4)));
+        NativeAdrenoIrqResult result;
+        peer.regs[0x0201]=1u<<20;
+        CHECK(irq.handle(&result)==kIOReturnSuccess && result.flags==NativeAdrenoIrqFence && peer.cleared==(1u<<20));
+        /* CP_RB (bit 15) is a known a6xx source with no class of its own */
+        peer.regs[0x0201]=1u<<15;
+        CHECK(irq.handle(&result)==kIOReturnSuccess && !result.flags);
+        /* the a7xx-only TSB/fuse bits are unknown here, never a security class */
+        peer.regs[0x0201]=(1u<<28)|(1u<<29);
+        CHECK(irq.handle(&result)==kIOReturnSuccess && result.flags==(NativeAdrenoIrqUnknown|NativeAdrenoIrqFatal) && result.unknown==((1u<<28)|(1u<<29)));
+        /* an LPAC replica bit in the CP status is not an a6xx fault, the base bits are */
+        peer.regs[0x0201]=1u<<9;peer.regs[0x0823]=1u<<8;
+        CHECK(irq.handle(&result)==kIOReturnSuccess && !result.flags && result.cp_status==(1u<<8));
+        peer.regs[0x0201]=1u<<9;peer.regs[0x0823]=0x10;peer.regs[0x0824]=0x55;
+        CHECK(irq.handle(&result)==kIOReturnSuccess && result.flags==(NativeAdrenoIrqCpError|NativeAdrenoIrqFatal) && result.protect_status==0x55);
+        CHECK(irq.detach()==kIOReturnSuccess);
+        NativeAdrenoIrq none;CHECK(none.attach(&io,NativeAdrenoFamily(3))==kIOReturnBadArgument);
+    }
+    std::printf("PASS: 1 exact A7XX mask programming, 10 decoded interrupt/status cases, 5 poison-on-unacknowledged cases over a software register peer; 1 exact A6XX mask programming, 5 a650 decode cases and 1 family refusal\n");
 }

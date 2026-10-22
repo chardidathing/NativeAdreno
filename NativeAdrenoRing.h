@@ -1,11 +1,12 @@
 /* SPDX-License-Identifier: MIT */
 #ifndef NATIVE_ADRENO_RING_H
 #define NATIVE_ADRENO_RING_H
+#include "NativeAdrenoFamily.h"
 #include <IOKit/IOTypes.h>
 #include <stddef.h>
 #include <stdint.h>
 
-/* A7XX command processor ring and timestamp fence, not a scheduler.
+/* Command processor ring and timestamp fence, not a scheduler.
  * Register indices are dword offsets; the platform adds the MMIO base and
  * multiplies by four. Caller must already own an exclusive, powered GPU with
  * SQE microcode loaded (CP_SQE_INSTR_BASE), global reset released and all
@@ -16,7 +17,11 @@
  * Every submit publishes ring memory before advancing WPTR and completes
  * only when the CP timestamp value is observed at the fence address.
  * A failed WPTR write or cache publication is uncertain: the ring is poisoned
- * and every resource must be retained until an independently verified reset. */
+ * and every resource must be retained until an independently verified reset.
+ * The packets follow the family: the a740 ring frames user work with the
+ * BR/BV thread control, markers and CP_EVENT_WRITE7 of a7xx_submit(), the
+ * a650 ring with the CCU invalidates and CP_EVENT_WRITE CACHE_FLUSH_TS of
+ * a6xx_submit(). */
 struct NativeAdrenoRingIo {
     void *cookie;
     /* Return zero only on a completed access. */
@@ -51,8 +56,11 @@ class NativeAdrenoRing final {
     uint64_t ring_iova_=0,fence_iova_=0;
     uint32_t next_=0,rptr_shadow_=0,seqno_=0,completed_=0,submissions_=0;
     bool attached_=false,poisoned_=false,reset_pending_=false;
+    bool binning_=true;   /* the a740 framing; false for the a650 */
     IOReturn poison();
     IOReturn readRptr(uint32_t *);
+    uint32_t prologueWords(bool reset) const;
+    uint32_t framedFenceWords() const;
     IOReturn emitPrologue(uint32_t at,bool reset,uint32_t *end);
     IOReturn emitFence(uint32_t at,uint32_t seqno,uint32_t *end);
     IOReturn emitFramedFence(uint32_t at,uint32_t seqno,uint32_t *end);
@@ -65,10 +73,12 @@ public:
     /* ring_bytes is a power of two in [8KiB,1MiB]; ring_iova must be aligned
      * to ring_bytes. fence_bytes >=64 and fence_iova 8-aligned. The fence page
      * layout is: +0 CP read-pointer shadow, +4 completed timestamp, +8 spare.
-     * All outputs are prevalidated before any register write. */
+     * All outputs are prevalidated before any register write. The family
+     * picks the packet framing; the default keeps the a740 ring. */
     IOReturn attach(const NativeAdrenoRingIo *,const NativeAdrenoRingCache *,
         void *ring,size_t ring_bytes,uint64_t ring_iova,
-        void *fence,size_t fence_bytes,uint64_t fence_iova);
+        void *fence,size_t fence_bytes,uint64_t fence_iova,
+        NativeAdrenoFamily family=NativeAdrenoFamilyA740);
     /* Programs nothing. Refuses while submissions are unobserved or poisoned,
      * because only the caller can establish real GPU quiescence and unmap. */
     IOReturn detach();
@@ -76,11 +86,12 @@ public:
      * it with one WPTR update. Returns a nonzero fence value on success. The
      * words are copied; the caller's buffer is never retained. */
     IOReturn submit(const uint32_t *words,size_t word_count,uint32_t *fence);
-    /* User command buffers: the A7XX BR/BV thread framing of a7xx_submit() around the words (CP init and the kernel's own
-     * bring-up packets keep the plain submit() above, as Linux sends them outside a7xx_submit()). */
+    /* User command buffers: the family's submit() framing around the words (CP init and the kernel's own bring-up
+     * packets keep the plain submit() above, as Linux sends them outside the submit path). */
     IOReturn submitFramed(const uint32_t *words,size_t word_count,uint32_t *fence);
-    /* The next framed submission starts with the A7XX context entry of a6xx_set_pagetable() (BR/BV counters, on-chip
-     * timestamps and resource table cleared between thread syncs); a new user client requests it, as Linux does per context. */
+    /* The next framed submission starts with the context entry of a6xx_set_pagetable() (on the a740 the BR/BV counters,
+     * on-chip timestamps and resource table cleared between thread syncs, on the a650 the perf counter SRAM clear with
+     * protected mode dropped around it); a new user client requests it, as Linux does per context. */
     void requestContextReset() {reset_pending_=true;}
     /* Polls the CP-written timestamp after invalidating the fence page. Never
      * writes registers and never advances the ring. Timeout is not poison. */
@@ -97,5 +108,6 @@ public:
     uint32_t completedFence() const {return completed_;}
     uint32_t submissions() const {return submissions_;}
     uint32_t readPointer() const {return rptr_shadow_;}
+    bool concurrentBinning() const {return binning_;}
 };
 #endif

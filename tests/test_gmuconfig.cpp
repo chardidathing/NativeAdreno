@@ -42,9 +42,21 @@ int main()
     CHECK(small.allocate({0x4000,0x1000,0x2000,0x1000,0x1000,0x10000})==kIOReturnSuccess);
     CHECK(NativeAdrenoAssembleGmuConfig(&firmware,&small,1,100,&empty)==kIOReturnBadArgument);
     CHECK(empty.firmware==nullptr);
-    CHECK(small.release()==kIOReturnSuccess && allocator.release()==kIOReturnSuccess);
+    CHECK(small.release()==kIOReturnSuccess);
+    /* a650: the kona chip id selects the a650 sizes, so the config carries no debug object; the a740 layout is refused
+     * for that chip and the a650 layout for the a740 chip. */
+    NativeAdrenoGmuAllocator a650;
+    CHECK(a650.allocate(NativeAdrenoGmuFamilySizes(NativeAdrenoFamilyA650,0x10000))==kIOReturnSuccess);
+    ShengGmuConfig lean{};
+    CHECK(NativeAdrenoAssembleGmuConfig(&firmware,&a650,0x06050000u,100,&lean)==kIOReturnSuccess);
+    CHECK(lean.chip_id==0x06050000u && lean.dummy.bytes==0x1000 && lean.dummy.iova==0x60000000);
+    CHECK(!lean.debug.cpu && !lean.debug.bytes && !lean.debug.iova);
+    CHECK(lean.log.bytes==0x4000 && lean.log.iova==0x60001000 && lean.hfi.iova==0x60005000 && lean.icache.bytes==0xffc000);
+    CHECK(NativeAdrenoAssembleGmuConfig(&firmware,&a650,0x43050a01u,100,&empty)==kIOReturnBadArgument && !empty.firmware);
+    CHECK(NativeAdrenoAssembleGmuConfig(&firmware,&allocator,0x06050002u,100,&empty)==kIOReturnBadArgument && !empty.firmware);
+    CHECK(a650.release()==kIOReturnSuccess && allocator.release()==kIOReturnSuccess);
     CHECK(fixture.live.empty());
-    std::printf("PASS: 1 assembled GMU config, 7 argument refusals and 1 non-startup-profile refusal over host doubles\n");
+    std::printf("PASS: 1 assembled GMU config, 7 argument refusals and 1 non-startup-profile refusal over host doubles; 1 a650 config and 2 family/layout mismatch refusals\n");
 }
 /* Physical-page maintenance (imported BOs): record it; no host page is touched. */
 /* Host double: the page attribute change of user BOs has no host equivalent (no host page is touched). */

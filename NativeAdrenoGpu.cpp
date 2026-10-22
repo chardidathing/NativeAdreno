@@ -15,9 +15,11 @@ IOReturn NativeAdrenoGpu::start(const NativeAdrenoGpuBoard *board,
     if(started_)return kIOReturnBusy;
     if(!board || !config || !board->reserve || !board->bootGmu ||
         !board->programSmmu || !board->quiesce)return kIOReturnBadArgument;
+    const NativeAdrenoFamilyInfo *info=NativeAdrenoFamilyGet(NativeAdrenoFamily(config->family));
+    if(!info)return kIOReturnBadArgument;
     if(!config->mmio.write32 || !config->mmio.read32 || !config->mmio.barrier ||
         !config->cache.publish || !config->cache.acquire || !config->ring ||
-        !config->fence || !config->sqe_iova || !config->pwrup_reglist_iova ||
+        !config->fence || !config->sqe_iova || (info->uses_pwrup_list && !config->pwrup_reglist_iova) ||
         !config->clock.now_us || !config->start_timeout_us)
         return kIOReturnBadArgument;
     started_=true;board_=*board;
@@ -29,17 +31,17 @@ IOReturn NativeAdrenoGpu::start(const NativeAdrenoGpuBoard *board,
     if((status=board_.programSmmu(board_.cookie)))return fail(status);
     steps_=3;
     if((status=ring_.attach(&config->mmio,&config->cache,config->ring,config->ring_bytes,
-        config->ring_iova,config->fence,config->fence_bytes,config->fence_iova)))return fail(status);
+        config->ring_iova,config->fence,config->fence_bytes,config->fence_iova,info->family)))return fail(status);
     steps_=4;
     NativeAdrenoCpInitConfig cp{config->sqe_iova,config->pwrup_reglist_iova,0};
-    if((status=cp_.run(&config->mmio,&ring_,&cp,&fence_)))return fail(status);
+    if((status=cp_.run(&config->mmio,&ring_,&cp,&fence_,info->family)))return fail(status);
     /* A started CP is not ready until its init fence is actually observed. */
     const NativeAdrenoRingFence started=ring_.wait(fence_,&config->clock,
         config->start_timeout_us,nullptr);
     if(started!=NativeAdrenoRingFenceComplete)
         return fail(started==NativeAdrenoRingFenceTimeout?kIOReturnTimeout:kIOReturnIOError);
     steps_=5;
-    if((status=irq_.attach(&config->mmio)))return fail(status);
+    if((status=irq_.attach(&config->mmio,info->family)))return fail(status);
     if((status=irq_.programMask(nullptr)))return fail(status);
     steps_=6;
     if(config->time.read32) {

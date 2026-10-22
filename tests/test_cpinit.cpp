@@ -90,5 +90,27 @@ int main()
         CHECK(init.run(&io,&ring,&config,&fence)==kIOReturnIOError && init.poisoned());
         CHECK(ring.poisoned() && ring.detach()==kIOReturnBusy);
     }
-    std::printf("PASS: 1 exact CP_ME_INIT sequence with SQE base, 8 pre-MMIO refusals, 1 SQE write failure and 1 ring commit failure over a software CP register peer\n");
+    /* a650: a6xx_cp_init's eight word CP_ME_INIT alone, no thread control, no power-up list wanted. */
+    {
+        reset();NativeAdrenoRing ring;CHECK(ring.attach(&io,&cache,ringmem,sizeof(ringmem),0x100000,fencemem,sizeof(fencemem),0x108000,NativeAdrenoFamilyA650)==kIOReturnSuccess);
+        NativeAdrenoCpInit init;
+        NativeAdrenoCpInitConfig config{0x1000000,0,0};
+        uint32_t fence=0;
+        CHECK(init.run(&io,&ring,&config,&fence,NativeAdrenoFamilyA650)==kIOReturnSuccess && fence==1 && init.completed());
+        CHECK(peer.regs[0x0830]==0x1000000 && peer.regs[0x0831]==0);
+        CHECK((ringmem[0]>>16&0x7fu)==0x48 && (ringmem[0]&0x3fffu)==8);
+        CHECK(ringmem[1]==0x2f && ringmem[2]==3 && ringmem[3]==0x20000000);
+        for(unsigned i=4;i<9;++i)CHECK(ringmem[i]==0);
+        CHECK(peer.regs[0x0807]==16); /* nine init words plus the seven-word fence */
+        CHECK((ringmem[9]>>8&0x3ffffu)==0x885 && ringmem[10]==1 && (ringmem[11]>>16&0x7fu)==0x46 && ringmem[12]==(0x4u|(1u<<31)));
+        fencemem[1]=1;
+        CHECK(ring.wait(1,&clock_,1000,nullptr)==NativeAdrenoRingFenceComplete && ring.detach()==kIOReturnSuccess);
+        /* an unknown family is refused before MMIO, and the a740 still wants its list */
+        reset();NativeAdrenoRing other;CHECK(other.attach(&io,&cache,ringmem,sizeof(ringmem),0x100000,fencemem,sizeof(fencemem),0x108000)==kIOReturnSuccess);
+        NativeAdrenoCpInit again;NativeAdrenoCpInitConfig nolist{0x200000,0,0};
+        CHECK(again.run(&io,&other,&nolist,&fence,NativeAdrenoFamily(9))==kIOReturnBadArgument);
+        CHECK(again.run(&io,&other,&nolist,&fence)==kIOReturnBadArgument && peer.regs[0x0807]==0 && !again.completed());
+        CHECK(other.detach()==kIOReturnSuccess);
+    }
+    std::printf("PASS: 1 exact CP_ME_INIT sequence with SQE base, 8 pre-MMIO refusals, 1 SQE write failure and 1 ring commit failure over a software CP register peer; 1 a650 a6xx_cp_init sequence and 2 family refusals\n");
 }

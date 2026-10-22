@@ -16,12 +16,13 @@ static void readBack(const ArmSmmu4KIo *io,const ArmSmmu4KProgramResult *program
     io->read64(io->cookie,size_t(program->context_offset)+0x20,&r->ttbr0);
 }
 IOReturn NativeAdrenoGmuContext::bringUp(const ArmSmmu4KIo *io,unsigned bank,unsigned asid,
-    unsigned slot,uint16_t sid,void (*progress)(uint32_t),NativeAdrenoGmuContextReport *report)
+    unsigned slot,uint16_t sid,void (*progress)(uint32_t),NativeAdrenoGmuContextReport *report,
+    NativeAdrenoFamily family)
 {
     if(!report)return kIOReturnBadArgument;
     *report={};
     if(used_)return kIOReturnBusy;
-    if(!io || bank>63 || !asid || asid>0xffff || slot>127)return kIOReturnBadArgument;
+    if(!io || bank>63 || !asid || asid>0xffff || slot>127 || !NativeAdrenoFamilyGet(family))return kIOReturnBadArgument;
     used_=true;
     IOReturn status=kIOReturnSuccess;
     auto step=[&](Step s) {report->step=s;if(progress)progress(s);};
@@ -36,7 +37,7 @@ IOReturn NativeAdrenoGmuContext::bringUp(const ArmSmmu4KIo *io,unsigned bank,uns
         if(report->output_bits>40)report->output_bits=40;
         if(!report->output_bits)status=kIOReturnUnsupported;
     }
-    if(!status)status=gmu_.allocate(NativeAdrenoGmuDefaultSizes(TablePages*0x1000),report->output_bits);
+    if(!status)status=gmu_.allocate(NativeAdrenoGmuFamilySizes(family,TablePages*0x1000),report->output_bits);
     if(!status) {
         step(Prepare);
         status=smmu_.prepare(&gmu_.tables(),0,0,GmuApertureBytes,NativeAdrenoSmmuContext::MaxLeaves,
@@ -89,19 +90,26 @@ IOReturn NativeAdrenoGmuContext::bringUp(const ArmSmmu4KIo *io,unsigned bank,uns
 }
 /* Lives for the rest of the boot: the context bank points at its tables. */
 static NativeAdrenoGmuContext *board_context;
-extern "C" IOReturn NativeAdrenoGmuContextBringup(volatile uint8_t *smmu,size_t bytes,
+extern "C" IOReturn NativeAdrenoGmuContextBringupFamily(uint32_t family,volatile uint8_t *smmu,size_t bytes,
     unsigned bank,unsigned asid,unsigned slot,unsigned sid,void (*progress)(uint32_t),
     NativeAdrenoGmuContextReport *report)
 {
     static ArmSmmu4KMmio mmio;
     static ArmSmmu4KIo io;
     NativeAdrenoGmuContext *&context=board_context;
-    if(!report || context || !smmu || !bytes || sid>0xffff)return kIOReturnBadArgument;
+    if(!report || context || !smmu || !bytes || sid>0xffff || !NativeAdrenoFamilyGet(NativeAdrenoFamily(family)))
+        return kIOReturnBadArgument;
     mmio={reinterpret_cast<volatile unsigned char *>(smmu),bytes};
     if(ArmSmmu4KBindMmio(&mmio,&io)!=ArmSmmu4KSuccess)return kIOReturnBadArgument;
     context=new NativeAdrenoGmuContext;
     if(!context)return kIOReturnNoMemory;
-    return context->bringUp(&io,bank,asid,slot,uint16_t(sid),progress,report);
+    return context->bringUp(&io,bank,asid,slot,uint16_t(sid),progress,report,NativeAdrenoFamily(family));
+}
+extern "C" IOReturn NativeAdrenoGmuContextBringup(volatile uint8_t *smmu,size_t bytes,
+    unsigned bank,unsigned asid,unsigned slot,unsigned sid,void (*progress)(uint32_t),
+    NativeAdrenoGmuContextReport *report)
+{
+    return NativeAdrenoGmuContextBringupFamily(NativeAdrenoFamilyA740,smmu,bytes,bank,asid,slot,sid,progress,report);
 }
 extern "C" IOReturn NativeAdrenoGmuContextPayloads(NativeAdrenoGmuPayload out[5])
 {
@@ -114,6 +122,7 @@ extern "C" IOReturn NativeAdrenoGmuContextPayloads(NativeAdrenoGmuPayload out[5]
     const uint64_t iovas[5]={layout.icache_iova,layout.dummy_iova,layout.debug_iova,layout.log_iova,layout.hfi_iova};
     for(unsigned i=0;i<5;++i) {
         const NativeAdrenoMemory *m=objects[i];
+        if(!m->bytes())continue;   /* the a650 has no debug object: its entry stays zero */
         if(m->spanCount()!=1 || m->spans()[0].bytes!=m->bytes())return kIOReturnUnsupported;
         out[i]={m->spans()[0].physical,m->bytes(),iovas[i]};
     }

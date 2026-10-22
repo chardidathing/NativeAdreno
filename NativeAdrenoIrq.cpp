@@ -34,6 +34,8 @@ enum : uint32_t {
     IrqBitHang = 1u << 23,
     IrqBitUcheOob = 1u << 24,
     IrqBitUcheTrap = 1u << 25,
+    IrqBitDebbus0 = 1u << 26,
+    IrqBitDebbus1 = 1u << 27,
     IrqBitTsbWrite = 1u << 28,
     IrqBitFuse = 1u << 29,
     IrqBitIsdbCpu = 1u << 30,
@@ -46,6 +48,13 @@ static constexpr uint32_t kKnown = IrqBitIdle | IrqBitAhb | IrqBitAtbAsync | Irq
     IrqBitCpWtDone | IrqBitCpFence | IrqBitCpFenceLpac | IrqBitAtbBus | IrqBitHang |
     IrqBitUcheOob | IrqBitUcheTrap | IrqBitTsbWrite | IrqBitFuse | IrqBitIsdbCpu |
     IrqBitIsdbDebug;
+/* The A6XX bitset of a6xx.xml without the A7XX-only sources (IPC, LPAC, TSB write, fuse); CP_RB sits where PM4CPINTERRUPT
+ * does on the a7xx, and the debug bus sources are its own. */
+static constexpr uint32_t kKnownA6xx = IrqBitIdle | IrqBitAhb | IrqBitAtbAsync | IrqBitGpc |
+    IrqBitCpSw | IrqBitCpHw | IrqBitCpCcuDepth | IrqBitCpCcuColor | IrqBitCpCcuResolve |
+    IrqBitCpIb1 | IrqBitCpIb2 | IrqBitCpPm4 | IrqBitCpRbDone | IrqBitCpWtDone | IrqBitCpFence |
+    IrqBitAtbBus | IrqBitHang | IrqBitUcheOob | IrqBitUcheTrap | IrqBitDebbus0 | IrqBitDebbus1 |
+    IrqBitIsdbCpu | IrqBitIsdbDebug;
 /* A7XX_INT_MASK from the pinned a6xx_gpu.c. */
 static constexpr uint32_t kEnable = IrqBitAhb | IrqBitAtbAsync | IrqBitGpc | IrqBitCpSw |
     IrqBitCpHw | IrqBitCpPm4 | IrqBitCpRbDone | IrqBitCpFence | IrqBitAtbBus |
@@ -64,26 +73,43 @@ uint32_t NativeAdrenoIrq::cpErrorMask()
 {
     return kCpErrors;
 }
-IOReturn NativeAdrenoIrq::attach(const NativeAdrenoRingIo *io)
+uint32_t NativeAdrenoIrq::maskFor(NativeAdrenoFamily family)
+{
+    const NativeAdrenoFamilyInfo *info=NativeAdrenoFamilyGet(family);
+    return info?info->irq_mask:0;
+}
+uint32_t NativeAdrenoIrq::cpErrorMaskFor(NativeAdrenoFamily family)
+{
+    const NativeAdrenoFamilyInfo *info=NativeAdrenoFamilyGet(family);
+    return info?info->cp_error_mask:0;
+}
+uint32_t NativeAdrenoIrq::knownFor(NativeAdrenoFamily family)
+{
+    return family==NativeAdrenoFamilyA650?kKnownA6xx:family==NativeAdrenoFamilyA740?kKnown:0;
+}
+IOReturn NativeAdrenoIrq::attach(const NativeAdrenoRingIo *io,NativeAdrenoFamily family)
 {
     if(attached_ || poisoned_)return kIOReturnBusy;
     if(!io || !io->read32 || !io->write32 || !io->barrier)return kIOReturnBadArgument;
-    io_=*io;attached_=true;enabled_=0;
+    const NativeAdrenoFamilyInfo *info=NativeAdrenoFamilyGet(family);
+    if(!info)return kIOReturnBadArgument;
+    io_=*io;info_=info;attached_=true;enabled_=0;
     return kIOReturnSuccess;
 }
 IOReturn NativeAdrenoIrq::detach()
 {
     if(poisoned_ || !attached_)return kIOReturnNotReady;
-    attached_=false;io_={};enabled_=0;return kIOReturnSuccess;
+    attached_=false;io_={};info_=nullptr;enabled_=0;return kIOReturnSuccess;
 }
 IOReturn NativeAdrenoIrq::programMask(uint32_t *programmed)
 {
     if(!attached_ || poisoned_)return kIOReturnNotReady;
     if(programmed)*programmed=0;
     uint32_t readback=0;
-    if(io_.write32(io_.cookie,IrqRbbmMask,kEnable))return poison();
+    const uint32_t enable=info_->irq_mask;
+    if(io_.write32(io_.cookie,IrqRbbmMask,enable))return poison();
     if(io_.read32(io_.cookie,IrqRbbmMask,&readback))return poison();
-    if(readback!=kEnable)return poison();
+    if(readback!=enable)return poison();
     enabled_=readback;
     if(programmed)*programmed=readback;
     return kIOReturnSuccess;
@@ -98,6 +124,9 @@ IOReturn NativeAdrenoIrq::handle(NativeAdrenoIrqResult *result)
     /* Linux acknowledges the whole read status before decoding it. */
     if(io_.write32(io_.cookie,IrqRbbmClear,status))return poison();
     if(io_.barrier(io_.cookie))return poison();
+    const uint32_t known=knownFor(info_->family),cp_errors=info_->cp_error_mask;
+    /* the fuse and TSB sources only exist on the a7xx; on the a6xx those bits are unknown */
+    const uint32_t security=info_->family==NativeAdrenoFamilyA740?(IrqBitTsbWrite|IrqBitFuse):0;
     uint32_t flags=0,cp_status=0,protect=0;
     if(status&IrqBitCpFence)flags|=NativeAdrenoIrqFence;
     if(status&IrqBitCpSw)flags|=NativeAdrenoIrqPreempt;
@@ -105,15 +134,15 @@ IOReturn NativeAdrenoIrq::handle(NativeAdrenoIrqResult *result)
     if(status&(IrqBitHang))flags|=NativeAdrenoIrqHang;
     if(status&(IrqBitUcheOob|IrqBitUcheTrap))flags|=NativeAdrenoIrqUche;
     if(status&(IrqBitAhb|IrqBitGpc|IrqBitAtbAsync|IrqBitAtbBus))flags|=NativeAdrenoIrqBusError;
-    if(status&(IrqBitTsbWrite|IrqBitFuse))flags|=NativeAdrenoIrqSecurity;
+    if(status&security)flags|=NativeAdrenoIrqSecurity;
     if(status&IrqBitCpHw) {
         if(io_.read32(io_.cookie,IrqCpStatus,&cp_status))return poison();
-        if(cp_status&kCpErrors) {
+        if(cp_status&cp_errors) {
             if(io_.read32(io_.cookie,IrqCpProtect,&protect))return poison();
             flags|=NativeAdrenoIrqCpError;
         }
     }
-    const uint32_t unknown=status&~kKnown;
+    const uint32_t unknown=status&~known;
     if(unknown)flags|=NativeAdrenoIrqUnknown;
     if(flags&(NativeAdrenoIrqHang|NativeAdrenoIrqCpError|NativeAdrenoIrqUche|
         NativeAdrenoIrqBusError|NativeAdrenoIrqSecurity|NativeAdrenoIrqUnknown))

@@ -59,7 +59,25 @@ int main()
         CHECK(!allocator.ready() && fixture.live.empty());
         fixture.allocation_fail=false;
     }
-    std::printf("PASS: 1 fixed a6xx GMU layout allocation and release, 5 size/range refusals, 1 allocation failure and 1 repeat-allocation refusal over host doubles\n");
+    /* a650 family: a6xx_gmu_init's 4 KiB dummy and no debug object; log and hfi follow the dummy as before. */
+    {
+        fixture=MemoryFixture{};
+        const NativeAdrenoGmuSizes sizes=NativeAdrenoGmuFamilySizes(NativeAdrenoFamilyA650,0x10000);
+        CHECK(sizes.icache==0xffc000 && sizes.dummy==0x1000 && sizes.debug==0 && sizes.log==0x4000 && sizes.hfi==0x4000 && sizes.tables==0x10000);
+        const NativeAdrenoGmuSizes a740=NativeAdrenoGmuFamilySizes(NativeAdrenoFamilyA740,0x10000);
+        CHECK(a740.dummy==0x4000 && a740.debug==0x7000 && a740.icache==sizes.icache);
+        const NativeAdrenoGmuSizes none=NativeAdrenoGmuFamilySizes(NativeAdrenoFamily(5),0x10000);
+        CHECK(!none.icache && !none.tables);
+        NativeAdrenoGmuAllocator allocator;
+        CHECK(allocator.allocate(none)==kIOReturnBadArgument && fixture.live.empty());
+        CHECK(allocator.allocate(sizes)==kIOReturnSuccess && allocator.ready() && !allocator.hasDebug());
+        const NativeAdrenoGmuMemoryLayout &layout=allocator.layout();
+        CHECK(layout.icache_iova==0x4000 && layout.dummy_iova==0x60000000 && layout.debug_iova==0);
+        CHECK(layout.log_iova==0x60001000 && layout.hfi_iova==0x60005000 && layout.end_iova==0x60009000);
+        CHECK(allocator.dummy().bytes()==0x1000 && allocator.debug().bytes()==0 && fixture.live.size()==5);
+        CHECK(allocator.release()==kIOReturnSuccess && fixture.live.empty());
+    }
+    std::printf("PASS: 1 fixed a6xx GMU layout allocation and release, 5 size/range refusals, 1 allocation failure and 1 repeat-allocation refusal over host doubles; 1 a650 layout without a debug object and 1 unknown-family refusal\n");
 }
 /* Physical-page maintenance (imported BOs): record it; no host page is touched. */
 /* Host double: the page attribute change of user BOs has no host equivalent (no host page is touched). */

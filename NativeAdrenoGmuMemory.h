@@ -1,6 +1,7 @@
 /* SPDX-License-Identifier: MIT */
 #ifndef NATIVE_ADRENO_GMU_MEMORY_H
 #define NATIVE_ADRENO_GMU_MEMORY_H
+#include "NativeAdrenoFamily.h"
 #include "NativeAdrenoMemory.h"
 #include "NativeAdrenoVm.h"
 
@@ -11,7 +12,9 @@
  * that will translate them (the pool itself has no IOVA). Sizes are the ones the qualified GMU startup uses. All
  * objects are physically contiguous and page aligned; the allocator only
  * assigns addresses and never maps them or touches the SMMU. Any failure
- * releases what it allocated and leaves no layout. */
+ * releases what it allocated and leaves no layout. The a650 family has no
+ * debug object (a6xx_gmu_init allocates it for a660 and a7xx only): a zero
+ * debug size allocates and maps nothing there. */
 enum : uint64_t {
     GmuIcacheIova=0x4000, GmuUncachedBase=0x60000000, GmuDebugIova=0x60400000,
     GmuApertureBytes=0x80000000
@@ -19,8 +22,10 @@ enum : uint64_t {
 struct NativeAdrenoGmuSizes {
     uint64_t icache,dummy,debug,log,hfi,tables;
 };
-/* Exact sizes of the qualified startup; table pool is caller sized. */
+/* Exact sizes of the qualified a740 startup; table pool is caller sized. */
 NativeAdrenoGmuSizes NativeAdrenoGmuDefaultSizes(size_t table_bytes);
+/* The family's sizes: the a740 ones above, or the a650 family's 4 KiB dummy and no debug object. */
+NativeAdrenoGmuSizes NativeAdrenoGmuFamilySizes(NativeAdrenoFamily family,size_t table_bytes);
 struct NativeAdrenoGmuMemoryLayout {
     uint64_t icache_iova,dummy_iova,debug_iova,log_iova,hfi_iova;
     uint64_t tables_iova;
@@ -38,7 +43,7 @@ public:
     ~NativeAdrenoGmuAllocator()=default;
     NativeAdrenoGmuAllocator(const NativeAdrenoGmuAllocator &)=delete;
     NativeAdrenoGmuAllocator &operator=(const NativeAdrenoGmuAllocator &)=delete;
-    /* Every size must be a nonzero 4KiB multiple and fit its fixed range. Every page lies below
+    /* Every size must be a nonzero 4KiB multiple and fit its fixed range (debug may be zero). Every page lies below
      * 2^address_bits: the SMMU output size (ID2.OAS) the context will use. */
     IOReturn allocate(const NativeAdrenoGmuSizes &sizes,unsigned address_bits=40);
     /* Map every payload into the VM's lower region at its assigned IOVA with
@@ -51,6 +56,7 @@ public:
      * destroyed and the caller keeps the quarantined objects alive. */
     IOReturn release();
     bool ready() const {return ready_;}
+    bool hasDebug() const {return debug_.bytes()!=0;}
     const NativeAdrenoGmuMemoryLayout &layout() const {return layout_;}
     NativeAdrenoMemory &icache() {return icache_;}
     NativeAdrenoMemory &dummy() {return dummy_;}

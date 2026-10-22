@@ -214,4 +214,44 @@ int main()
         std::printf("PASS: 1 exact ring programming and submission, 1 wrap submission, 1 refused re-attach, 7 write/1 read attach failures and 4 post-commit poison cases over a software CP register peer (%u failure cases)\n",
             cases);
     }
+    /* a650: a6xx_submit() framing, one thread, CP_EVENT_WRITE CACHE_FLUSH_TS fences. */
+    {
+        reset();NativeAdrenoRing r;
+        CHECK(r.attach(&io,&cache,ring,sizeof(ring),0x100000,fence,sizeof(fence),0x108000,NativeAdrenoFamilyA650)==kIOReturnSuccess);
+        CHECK(!r.concurrentBinning());
+        auto op=[](uint32_t header) {return (header>>28)==7u?(header>>16)&0x7fu:0xffu;};
+        const uint32_t words[4]={0x11111111,0x22222222,0x33333333,0x44444444};
+        uint32_t end=0;
+        /* plain submission: the words, CP_SCRATCH(2), CACHE_FLUSH_TS with IRQ to the fence word */
+        CHECK(r.submit(words,4,&end)==kIOReturnSuccess && end==1 && peer.writes.back().second==11);
+        for(unsigned i=0;i<4;++i)CHECK(ring[i]==words[i]);
+        CHECK((ring[4]>>8&0x3ffffu)==0x885 && ring[5]==1);
+        CHECK(op(ring[6])==0x46 && (ring[6]&0x3fffu)==4 && ring[7]==(0x4u|(1u<<31)) && ring[8]==0x108004 && ring[9]==0 && ring[10]==1);
+        fence[1]=1;uint32_t observed=0;
+        CHECK(r.wait(1,&clock_,5000,&observed)==NativeAdrenoRingFenceComplete && observed==1);
+        /* framed: the two CCU invalidates before the words, the same fence after them, nothing a7xx */
+        CHECK(r.submitFramed(words,4,&end)==kIOReturnSuccess && end==2 && peer.writes.back().second==11+4+4+7);
+        CHECK(op(ring[11])==0x46 && ring[12]==0x18 && op(ring[13])==0x46 && ring[14]==0x19);
+        for(unsigned i=0;i<4;++i)CHECK(ring[15+i]==words[i]);
+        CHECK((ring[19]>>8&0x3ffffu)==0x885 && ring[20]==2 && op(ring[21])==0x46 && ring[22]==(0x4u|(1u<<31)) && ring[23]==0x108004 && ring[25]==2);
+        for(unsigned i=11;i<26;++i)CHECK(op(ring[i])!=0x17 && op(ring[i])!=0x65 && op(ring[i])!=0x14);
+        fence[1]=2;
+        CHECK(r.wait(2,&clock_,5000,&observed)==NativeAdrenoRingFenceComplete);
+        /* the a6xx context entry: protected mode off, the perf counter SRAM clear, CACHE_INVALIDATE, the wait for it,
+         * protected mode on, then the usual prologue */
+        r.requestContextReset();
+        CHECK(r.submitFramed(words,1,&end)==kIOReturnSuccess && end==3 && peer.writes.back().second==26+15+4+1+7);
+        CHECK(op(ring[26])==0x5f && ring[27]==0 && (ring[28]>>8&0x3ffffu)==0x50e && ring[29]==1);
+        CHECK(op(ring[30])==0x46 && ring[31]==0x31);
+        CHECK(op(ring[32])==0x3c && ring[33]==3 && ring[34]==0x50f && ring[35]==0 && ring[36]==1 && ring[37]==1 && ring[38]==0);
+        CHECK(op(ring[39])==0x5f && ring[40]==1 && op(ring[41])==0x46 && ring[42]==0x18 && op(ring[43])==0x46 && ring[44]==0x19 && ring[45]==words[0]);
+        fence[1]=3;
+        CHECK(r.wait(3,&clock_,5000,&observed)==NativeAdrenoRingFenceComplete);
+        CHECK(r.submitFramed(words,1,&end)==kIOReturnSuccess && end==4 && peer.writes.back().second==53+4+1+7);
+        fence[1]=4;
+        CHECK(r.wait(4,&clock_,5000,&observed)==NativeAdrenoRingFenceComplete && r.detach()==kIOReturnSuccess);
+        NativeAdrenoRing none;
+        CHECK(none.attach(&io,&cache,ring,sizeof(ring),0x100000,fence,sizeof(fence),0x108000,NativeAdrenoFamily(6))==kIOReturnBadArgument);
+        std::printf("PASS: a650 ring with 1 plain, 2 framed and 1 context-entry submission in a6xx_submit() framing, 1 family refusal\n");
+    }
 }
